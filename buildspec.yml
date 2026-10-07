@@ -1,0 +1,12 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - curl -fsSL -o /tmp/terraform.zip https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
+      - unzip -o /tmp/terraform.zip -d /usr/local/bin
+  build:
+    commands:
+      - terraform fmt -check -recursive
+      - terraform init -backend=false -input=false
+      - terraform validate
