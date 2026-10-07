@@ -8,5 +8,3 @@ phases:
   build:
     commands:
       - terraform fmt -check -recursive
-      - terraform init -backend=false -input=false
-      - terraform validate
