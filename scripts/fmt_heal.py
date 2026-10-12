@@ -47,11 +47,46 @@ def run(
     )
 
 
+def github_token() -> str:
+    return os.environ.get("GITHUB_TOKEN", "").strip().strip('"').strip("'")
+
+
+def authed_repo_url(token: str) -> str:
+    return f"https://x-access-token:{token}@github.com/{REPO}.git"
+
+
 def redact(text: str) -> str:
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = github_token()
     if token and text:
         return text.replace(token, "***")
     return text
+
+
+def require_github_access(token: str) -> None:
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{REPO}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "pilot-fmt-heal",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request) as response:
+            response.read()
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            raise SystemExit(
+                "GitHub rejected GITHUB_TOKEN. Paste the token value that starts with github_pat_ or ghp_, not the token name."
+            ) from error
+        if error.code == 404:
+            raise SystemExit(
+                "GITHUB_TOKEN cannot read this private repository. Recreate it for "
+                "pilot-aws-bedrock-ai-infra with Contents set to Read and write."
+            ) from error
+        detail = redact(error.read().decode())
+        raise SystemExit(f"GitHub repository check failed ({error.code}).\n{detail}") from error
 
 
 def command_text(result: subprocess.CompletedProcess[str]) -> str:
@@ -198,19 +233,20 @@ def use_git_checkout(paths: list[str], token: str) -> None:
     probe = run(["git", "rev-parse", "--is-inside-work-tree"])
     if probe.returncode == 0 and probe.stdout.strip() == "true":
         return
+    require_github_access(token)
     snapshots = {path: (ROOT / path).read_text() for path in paths}
     clone = Path(tempfile.mkdtemp(prefix="fmt-heal-"))
     cloned = subprocess.run(
         [
             "git",
             "-c",
-            f"http.extraheader=AUTHORIZATION: bearer {token}",
+            "credential.helper=",
             "clone",
             "--depth",
             "1",
             "--branch",
             BASE_BRANCH,
-            f"https://github.com/{REPO}.git",
+            authed_repo_url(token),
             str(clone),
         ],
         text=True,
@@ -265,9 +301,9 @@ def push_branch(branch: str, token: str) -> None:
         [
             "git",
             "-c",
-            f"http.extraheader=AUTHORIZATION: bearer {token}",
+            "credential.helper=",
             "push",
-            f"https://github.com/{REPO}.git",
+            authed_repo_url(token),
             f"HEAD:refs/heads/{branch}",
         ]
     )
@@ -340,7 +376,7 @@ def main() -> None:
     print(summary)
     apply_files(proposal, paths)
     normalized = ensure_formatted()
-    token = os.environ.get("GITHUB_TOKEN", "")
+    token = github_token()
     if not token:
         raise SystemExit(
             "Format fix is ready in this build, but GITHUB_TOKEN is not set, so no pull request was opened."
