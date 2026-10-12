@@ -182,8 +182,54 @@ def ensure_formatted() -> bool:
     return True
 
 
-def commit_fix(paths: list[str], summary: str) -> str:
-    sha = run(["git", "rev-parse", "--short", "HEAD"], check=True).stdout.strip()
+def source_sha() -> str:
+    resolved = os.environ.get("CODEBUILD_RESOLVED_SOURCE_VERSION", "").strip()
+    if resolved and not resolved.startswith("arn:"):
+        return resolved[:7]
+    result = run(["git", "rev-parse", "--short", "HEAD"])
+    if result.returncode == 0 and result.stdout.strip():
+        return result.stdout.strip()
+    return "nosha"
+
+
+def use_git_checkout(paths: list[str], token: str) -> None:
+    """CodePipeline sends a zip with no .git directory. Clone main, then keep the formatted files."""
+    global ROOT
+    probe = run(["git", "rev-parse", "--is-inside-work-tree"])
+    if probe.returncode == 0 and probe.stdout.strip() == "true":
+        return
+    snapshots = {path: (ROOT / path).read_text() for path in paths}
+    clone = Path(tempfile.mkdtemp(prefix="fmt-heal-"))
+    cloned = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"http.extraheader=AUTHORIZATION: bearer {token}",
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            BASE_BRANCH,
+            f"https://github.com/{REPO}.git",
+            str(clone),
+        ],
+        text=True,
+        capture_output=True,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if cloned.returncode != 0:
+        detail = redact(((cloned.stdout or "") + "\n" + (cloned.stderr or "")).strip())
+        raise SystemExit(f"git clone failed.\n{detail}")
+    for path, content in snapshots.items():
+        target = clone / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    ROOT = clone
+
+
+def commit_fix(paths: list[str], summary: str, token: str) -> str:
+    use_git_checkout(paths, token)
+    sha = source_sha()
     build = os.environ.get("CODEBUILD_BUILD_NUMBER", "local")
     branch = f"bedrock/fmt-{sha}-{build}"
     checkout = run(["git", "checkout", "-b", branch])
@@ -299,7 +345,7 @@ def main() -> None:
         raise SystemExit(
             "Format fix is ready in this build, but GITHUB_TOKEN is not set, so no pull request was opened."
         )
-    branch = commit_fix(paths, summary)
+    branch = commit_fix(paths, summary, token)
     push_branch(branch, token)
     url = open_pull_request(branch, summary, diff_text, normalized, token)
     print(f"Pull request: {url}")
